@@ -1,4 +1,6 @@
-let currentThreadId = localStorage.getItem("travel_thread_id") || null;
+let currentThreadId = null;
+// Older versions stored the thread in localStorage and reused it for every trip.
+try { localStorage.removeItem("travel_thread_id"); } catch (e) {}
 let latestAnswerMarkdown = "";
 let waitingForApproval = false;
 
@@ -141,19 +143,25 @@ async function sendMessage() {
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        message: message,
-        thread_id: currentThreadId
+        message: message
       })
     });
 
     const data = await response.json();
+
+    if (data.blocked) {
+      currentThreadId = null;
+      hideApproval();
+      document.getElementById("resultSection").classList.add("hidden");
+      showWorkflow(data);
+      throw new Error(data.error || "This request was blocked by the travel guardrail.");
+    }
 
     if (!response.ok || !data.success) {
       throw new Error(data.error || "Something went wrong.");
     }
 
     currentThreadId = data.thread_id;
-    localStorage.setItem("travel_thread_id", currentThreadId);
 
     showWorkflow(data);
 
@@ -211,7 +219,14 @@ async function submitApproval(approved) {
 
     showWorkflow(data);
     hideApproval();
-    showResult(data.answer, data.thread_id, false);
+
+    if (data.requires_approval) {
+      // A revision produces a new draft that still needs human review.
+      showResult(data.itinerary || data.answer, data.thread_id, true);
+      showApproval(data);
+    } else {
+      showResult(data.answer, data.thread_id, false);
+    }
   } catch (error) {
     showError(error.message);
   } finally {

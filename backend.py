@@ -392,6 +392,21 @@ def hotel_agent(state: TravelState):
 # Itinerary Agent - original behavior extended with selected results
 # =========================
 def itinerary_agent(state: TravelState):
+    feedback = state.get("human_feedback", "")
+    previous_draft = state.get("itinerary", "")
+
+    # When the reviewer asked for changes, revise the previous draft instead of
+    # starting over, so the revised draft goes back through human review.
+    revision_section = ""
+    if feedback and previous_draft:
+        revision_section = f"""
+Previous Draft:
+{previous_draft}
+
+Reviewer Feedback (apply it carefully):
+{feedback}
+"""
+
     prompt = f"""
 Create a complete travel itinerary.
 
@@ -406,7 +421,7 @@ Flight Results:
 
 Hotel Results:
 {state.get('hotel_results', '')}
-
+{revision_section}
 
 Make the itinerary practical, budget-aware, and easy to follow.
 Create a clear draft that is ready for human review.
@@ -419,10 +434,16 @@ Create a clear draft that is ready for human review.
         ]
     )
 
-    approval_request = (
-        "Please review the generated draft itinerary. Approve it to create the "
-        "final polished plan, or provide feedback for revision."
-    )
+    if revision_section:
+        approval_request = (
+            "The draft has been revised using your feedback. Approve it to create "
+            "the final polished plan, or provide more feedback."
+        )
+    else:
+        approval_request = (
+            "Please review the generated draft itinerary. Approve it to create the "
+            "final polished plan, or provide feedback for revision."
+        )
 
     return {
         "itinerary": response.content,
@@ -460,21 +481,12 @@ def human_approval_agent(state: TravelState):
     
 
 def final_agent(state: TravelState):
-    if state.get("approved", False):
-        review_instruction = (
-            "The user approved the draft. Preserve its decisions while polishing it."
-        )
-    else:
-        review_instruction = f"""
-The user requested a revision. Apply this feedback carefully:
-{state.get('human_feedback', '') or 'Improve the draft before finalizing it.'}
-"""
-
+    # Only reached after the human approved the draft (see route_after_approval).
     final_prompt = f"""
 Generate the final travel response for the user.
 
 Human Review:
-{review_instruction}
+The user approved the draft. Preserve its decisions while polishing it.
 
 User Request:
 {state['user_query']}
@@ -503,7 +515,6 @@ Important:
 - Be clear and practical.
 - Mention that live flight APIs may not provide ticket prices when pricing is unavailable.
 - Keep the response useful for real travel planning.
-- Incorporate the human feedback when revision was requested.
 """
 
     response = llm.invoke(
@@ -556,7 +567,13 @@ def route_after_agent(current_agent: str):
 
     return route
 
-        
+
+def route_after_approval(state: TravelState) -> str:
+    # Revisions loop back through the itinerary agent and human review again;
+    # only an explicit approval produces the final plan.
+    return "final_agent" if state.get("approved", False) else "itinerary_agent"
+
+
 graph=StateGraph(TravelState)
 
 graph.add_node("supervisor", supervisor_agent)
@@ -577,7 +594,11 @@ graph.add_conditional_edges(
     "hotel_agent", route_after_agent("hotel_agent"), ROUTE_MAP
 )
 graph.add_edge("itinerary_agent", "human_approval")
-graph.add_edge("human_approval", "final_agent")
+graph.add_conditional_edges(
+    "human_approval",
+    route_after_approval,
+    {"final_agent": "final_agent", "itinerary_agent": "itinerary_agent"},
+)
 graph.add_edge("final_agent", END)
 graph.add_edge("guardrail_blocked", END)
 
@@ -646,10 +667,21 @@ def _serialize_result(
     }
 
 
-def run_travel_agent(user_input: str, thread_id: str | None = None):
-    """Start a new travel-planning run and pause at human approval."""
-    if not thread_id:
-        thread_id = f"user_{uuid.uuid4().hex}"
+class ThreadNotFoundError(LookupError):
+    """No checkpoint exists for the given thread_id."""
+
+
+class NotAwaitingApprovalError(RuntimeError):
+    """The thread exists but is not paused at human approval."""
+
+
+def run_travel_agent(user_input: str):
+    """Start a new travel-planning run and pause at human approval.
+
+    Every trip gets its own thread so state from an earlier trip (messages,
+    feedback, a pending approval) never leaks into a new one.
+    """
+    thread_id = f"user_{uuid.uuid4().hex}"
 
     config = {"configurable": {"thread_id": thread_id}}
 
@@ -689,6 +721,15 @@ def resume_travel_agent(
         raise ValueError("thread_id is required to resume a travel plan.")
 
     config = {"configurable": {"thread_id": thread_id}}
+
+    snapshot = travel_graph.get_state(config)
+    if not snapshot.values:
+        raise ThreadNotFoundError(f"No travel plan found for thread '{thread_id}'.")
+    if not any(task.interrupts for task in snapshot.tasks):
+        raise NotAwaitingApprovalError(
+            "This travel plan is not waiting for approval."
+        )
+
     result = travel_graph.invoke(
         Command(
             resume={

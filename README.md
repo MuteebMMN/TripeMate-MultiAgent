@@ -27,7 +27,6 @@
 - [System Architecture](#-system-architecture)
 - [Using the App](#-using-the-app)
 - [API Reference](#-api-reference)
-- [Getting Started](#-getting-started)
 - [Project Structure](#-project-structure)
 - [Tech Stack](#-tech-stack)
 
@@ -68,8 +67,9 @@ flowchart TD
     HOTEL --> ITIN
 
     ITIN["🗺️ Itinerary Agent<br/><i>draft plan</i>"] --> HUMAN
-    HUMAN[/"🙋 Human Approval<br/><b>interrupt()</b>"/] --> FINAL
-    FINAL["✨ Final Agent<br/><i>polish or revise</i>"] --> END1([⏹ END])
+    HUMAN[/"🙋 Human Approval<br/><b>interrupt()</b>"/] -. "✅ approved" .-> FINAL
+    HUMAN -. "✏️ revise + feedback" .-> ITIN
+    FINAL["✨ Final Agent<br/><i>polish approved plan</i>"] --> END1([⏹ END])
     BLOCK --> END2([⏹ END])
 
     AV[(AviationStack MCP)] -.- FLIGHT
@@ -94,6 +94,7 @@ flowchart TD
 
 - Specialist agents always run in a fixed order: `flight_agent` → `hotel_agent` → `itinerary_agent`. Any agent the supervisor didn't select is skipped.
 - `itinerary_agent` **always** runs, because it combines whatever results the other agents produced.
+- **Revisions loop.** If you ask for changes, the itinerary agent revises its draft using your feedback and the graph pauses for review **again**. Only an explicit approval reaches `final_agent`, so nothing is labelled final until a person has approved it.
 - If the supervisor's JSON can't be parsed, the graph **falls back to the full workflow**. If the guardrail's JSON can't be parsed, the request is **allowed through**, so a formatting slip never breaks a real trip request.
 
 ---
@@ -122,15 +123,19 @@ sequenceDiagram
     API-->>UI: requires_approval = true
     UI-->>U: Shows draft + Approve / Revise
 
-    alt ✅ Approved
-        U->>UI: Approve
-    else ✏️ Revise
-        U->>UI: "Cheaper hotels, add a free day"
+    loop Until approved
+        U->>UI: ✏️ "Cheaper hotels, add a free day"
+        UI->>API: POST /api/travel/approve (approved=false)
+        API->>G: Command(resume={approved, feedback})
+        G->>G: Itinerary agent revises draft
+        G-->>API: ⏸ interrupt (revised draft)
+        API-->>UI: requires_approval = true
     end
-    UI->>API: POST /api/travel/approve
-    API->>G: Command(resume={approved, feedback})
+    U->>UI: ✅ Approve
+    UI->>API: POST /api/travel/approve (approved=true)
+    API->>G: Command(resume={approved: true})
     G->>DB: load checkpoint
-    G->>G: Final agent polishes / revises
+    G->>G: Final agent polishes the approved draft
     G-->>API: final_response
     API-->>UI: Final travel plan
     UI-->>U: 📄 Copy · Download PDF
@@ -169,13 +174,13 @@ Combines the user query, trip constraints, flight results and hotel results into
 <details>
 <summary><b>🙋 Human Approval</b></summary>
 
-Calls LangGraph's `interrupt()`, which saves the state to Postgres and pauses the run. It resumes when `/api/travel/approve` is called with `{approved, feedback}`.
+Calls LangGraph's `interrupt()`, which saves the state to Postgres and pauses the run. It resumes when `/api/travel/approve` is called with `{approved, feedback}`. An approval continues to the final agent. A revision sends the draft back to the itinerary agent and then pauses here again.
 </details>
 
 <details>
 <summary><b>✨ Final Agent</b></summary>
 
-Produces the finished plan with these sections: **Trip Summary · Flight Information · Hotel Suggestions · Day-by-Day Itinerary · Final Recommendations**. If you asked for a revision, it applies your feedback here.
+Runs only after you approve a draft. It polishes the approved draft into the finished plan with these sections: **Trip Summary · Flight Information · Hotel Suggestions · Day-by-Day Itinerary · Final Recommendations**.
 </details>
 
 ---
@@ -224,7 +229,7 @@ flowchart LR
 3. **Review the draft.** The draft itinerary appears together with an approval panel.
 4. **Approve or revise.**
    - ✅ **Approve** to get a polished final plan.
-   - ✏️ **Revise** with feedback such as *"reduce the hotel cost and add one free day"*. The final agent rewrites the plan to match.
+   - ✏️ **Revise** with feedback such as *"reduce the hotel cost and add one free day"*. You get a revised draft to review again, and you can revise as many times as you like before approving.
 5. **Export.** Copy the plan to your clipboard or download it as a PDF.
 
 ---
@@ -232,11 +237,11 @@ flowchart LR
 ## 📡 API Reference
 
 ### `POST /api/travel`
-Starts a new planning run. The run pauses at human approval.
+Starts a new planning run on a **new thread**. The run pauses at human approval.
 
 ```json
 // Request
-{ "message": "Plan a 5 day Dubai trip from Riyadh", "thread_id": null }
+{ "message": "Plan a 5 day Dubai trip from Riyadh" }
 ```
 
 ```json
@@ -254,12 +259,24 @@ Starts a new planning run. The run pauses at human approval.
 }
 ```
 
+If the guardrail blocks the request, the response is **`422`** with `"success": false`, `"blocked": true` and the reason in `error`.
+
 ### `POST /api/travel/approve`
 Resumes a paused run. `feedback` is **required** when `approved` is `false`.
 
 ```json
 { "thread_id": "user_3f9c...", "approved": false, "feedback": "Make it cheaper" }
 ```
+
+- `approved: false` returns a **revised draft** with `requires_approval: true`.
+- `approved: true` returns the final plan with `requires_approval: false`.
+
+| Status | When |
+|---|---|
+| `200` | Resumed successfully |
+| `400` | Rejected without feedback |
+| `404` | Unknown `thread_id` |
+| `409` | Thread exists but isn't waiting for approval (for example, already finalised) |
 
 ### `GET /health`
 Returns the service status and a list of enabled features.

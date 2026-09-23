@@ -8,7 +8,12 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
-from backend import run_travel_agent, resume_travel_agent
+from backend import (
+    NotAwaitingApprovalError,
+    ThreadNotFoundError,
+    resume_travel_agent,
+    run_travel_agent,
+)
 
 # This is kept from the original project to allow the existing synchronous
 # agent functions to call async MCP helpers inside FastAPI.
@@ -37,8 +42,9 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 
 class TravelRequest(BaseModel):
+    # Each new trip always starts on a fresh thread created by the backend;
+    # a thread_id sent by an older client is ignored.
     message: str
-    thread_id: str | None = None
 
 
 class ApprovalRequest(BaseModel):
@@ -70,10 +76,18 @@ async def travel_planner(request_data: TravelRequest):
                 },
             )
 
-        result = run_travel_agent(
-            user_input=user_message,
-            thread_id=request_data.thread_id,
-        )
+        result = run_travel_agent(user_input=user_message)
+
+        if not result["guardrail_allowed"]:
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "success": False,
+                    "blocked": True,
+                    "error": result["guardrail_reason"] or result["answer"],
+                    **result,
+                },
+            )
 
         return JSONResponse(
             content={
@@ -118,6 +132,18 @@ async def approve_travel_plan(request_data: ApprovalRequest):
                 "success": True,
                 **result,
             }
+        )
+
+    except ThreadNotFoundError as exc:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "error": str(exc)},
+        )
+
+    except NotAwaitingApprovalError as exc:
+        return JSONResponse(
+            status_code=409,
+            content={"success": False, "error": str(exc)},
         )
 
     except Exception as exc:

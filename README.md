@@ -266,59 +266,6 @@ Returns the service status and a list of enabled features.
 
 ---
 
-## 🚀 Getting Started
-
-### Prerequisites
-- Python **3.11+**
-- A **PostgreSQL** database, local or hosted (for example Render or Neon)
-- [`uv`](https://docs.astral.sh/uv/), which provides the `uvx` command used to launch the AviationStack MCP server
-- API keys for: [Groq](https://console.groq.com) · [Tavily](https://tavily.com) · [AviationStack](https://aviationstack.com)
-
-### 1. Clone and install
-
-```bash
-git clone https://github.com/MuteebMMN/TripeMate-MultiAgent.git
-cd TripeMate-MultiAgent
-
-python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-### 2. Configure environment variables
-
-Copy the example file and fill in your keys:
-
-```bash
-cp .env.example .env
-```
-
-| Variable | Required | Description |
-|---|:---:|---|
-| `GROQ_API_KEY` | ✅ | LLM inference |
-| `DATABASE_URL` | ✅ | PostgreSQL connection string. `sslmode=require` is added automatically |
-| `TAVILY_API_KEY` | ✅ | Hotel web search |
-| `AVIATIONSTACK_API_KEY` | ✅ | Airport and airline data |
-| `DEFAULT_ORIGIN_IATA` | ➖ | Default departure airport code |
-| `OPENWEATHER_API_KEY` | ➖ | Custom weather MCP server |
-| `LANGSMITH_*` | ➖ | Optional LangSmith tracing |
-
-### 3. Run
-
-```bash
-python app.py
-```
-
-Then open **http://127.0.0.1:8000** 🎉
-
-### 🐳 Run with Docker
-
-```bash
-docker build -t tripmate-ai .
-docker run -p 8000:8000 --env-file .env tripmate-ai
-```
-
----
 
 ## 📁 Project Structure
 
